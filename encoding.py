@@ -233,6 +233,8 @@ def decode(q_input, q_output):
             cnt = -1
             find_one = False
             while not find_one:
+                if pos >= len(data_gol):
+                    return cnt 
                 if data_gol[pos] == '1':
                     find_one = True
                 cnt += 1
@@ -247,12 +249,18 @@ def decode(q_input, q_output):
         while (not end_decode) and (cnt < 9):
             zero_num = count_zero(cur_pos)
             tmp_str = data_gol[cur_pos + zero_num : cur_pos + (zero_num * 2 + k + 1)]
-            dec_num = int(tmp_str, 2) - 2 ** k
+            if tmp_str:
+                dec_num = int(tmp_str, 2) - 2 ** k
+            else:
+                dec_num = - 2 ** k
             if (dec_num % 2) == 0:
                 dec_num = - dec_num / 2
             else:
                 dec_num = (dec_num + 1) / 2
             
+            if abs(dec_num) > 4095:
+                dec_num = 0
+
             data_resi[cnt] = dec_num
             cnt = cnt + 1
 
@@ -329,7 +337,7 @@ def decode(q_input, q_output):
         repeat_cnt = 0
         last_len = len(enc_str)
 
-        while (not dec_bin_end) and (len(enc_str) > 1) and (repeat_cnt < 100):
+        while (not dec_bin_end) and (len(enc_str) > 1) and (repeat_cnt < 200):
             last_len = len(enc_str)
             if len(enc_str) > 64:
                 enc_num = bin2float(enc_str[0:64])
