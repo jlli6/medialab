@@ -1,0 +1,3 @@
+[submodule "submodule/kalidokit"]
+	path = submodule/kalidokit
+	url = https://github.com/Avery-xu/kalidokit.git
