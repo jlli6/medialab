@@ -10,11 +10,36 @@ def write(q_input, fifo):
 def read(q_output, fifo):
     f = os.open(fifo, os.O_RDONLY)
     while (True):
-        q_output.put(os.read(f, 10))
+        q_output.put(os.read(f, 100))
 
 def test_noFIFO(q_input, q_output):
     while (True):
         q_output.put(q_input.get())
+
+def run_oneway(q_input, q_output):
+    def quic_server(path):
+        os.chdir(path)
+        os.system("./server 0.0.0.0 1114 > /dev/null")
+
+    def quic_client(path):
+        os.chdir(path)
+        os.system("./client 127.0.0.1 1114 > /dev/null")
+
+    quic_path = "/home/new_quic/build/"
+    input_pipe = quic_path + "svideopipe"
+    output_pipe = quic_path + "cvideopipe"
+
+    p_oneway_write = Process(target=write, args=(q_input, input_pipe,))
+    p_oneway_read = Process(target=read, args=(q_output, output_pipe,))
+    p_quic_server = Process(target=quic_server, args=(quic_path,))
+    p_quic_client = Process(target=quic_client, args=(quic_path,))
+
+    p_oneway_write.start()
+    p_oneway_read.start()
+
+    p_quic_server.start()
+    time.sleep(1)
+    p_quic_client.start()
 
 def run(q_input, q_output):
     return

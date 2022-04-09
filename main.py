@@ -18,6 +18,8 @@ def run_system(mode="run"):
     p_encoding = Process(target=encoding.encode, args=(q_send_server_encoding, q_send_encoding_pipe,))
     if mode == "test":
         p_pipe = Process(target=pipeIO.test_noFIFO, args=(q_send_encoding_pipe, q_receive_pipe_decoding,))
+    elif mode == "oneway":
+        p_pipe = Process(target=pipeIO.run_oneway, args=(q_send_encoding_pipe, q_receive_pipe_decoding,))
     else:
         p_pipe = Process(target=pipeIO.run, args=(q_send_encoding_pipe, q_receive_pipe_decoding))
     p_decoding = Process(target=encoding.decode, args=(q_receive_pipe_decoding, q_reveive_decoding_server,))
@@ -59,6 +61,8 @@ if __name__ == "__main__":
             if o in ("-t", "--test"):
                 if a == "system":
                     run_system(mode="test")
+                elif a == "oneway":
+                    run_system(mode="oneway")
                 elif a == "server":
                     test_server()
                 elif a == "encoding":
