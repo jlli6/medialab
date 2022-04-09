@@ -3,7 +3,7 @@ import json
 import numpy as np
 
 intra_period = 10
-data_len = 9
+data_len = 10
 
 def encode(q_input, q_output):
 
@@ -22,6 +22,7 @@ def encode(q_input, q_output):
         data_quant[6] = quant(data_ori["eye"]["r"], 0, 1, 0, 4095)
         data_quant[7] = quant(data_ori["mouth"]["x"], -0.6, 1.4, 0, 4095)
         data_quant[8] = quant(data_ori["mouth"]["y"], 0, 1, 0, 4095)
+        data_quant[9] = quant(data_ori["mouth"]["y"], 0, 1, 0, 4095)
         return data_quant
 
     def prediction(data_quant, data_last, cnt):
@@ -215,7 +216,7 @@ def decode(q_input, q_output):
         data_ori["eye"]["r"] = dequant(data_quant[6], 0, 1, 0, 4095)
         data_ori["mouth"] = {}
         data_ori["mouth"]["x"] = dequant(data_quant[7], -0.6, 1.4, 0, 4095)
-        data_ori["mouth"]["y"] = dequant(data_quant[8], 0, 1, 0, 4095)
+        data_ori["mouth"]["y"] = dequant(data_quant[8], 0, 1, 0, 64)
         return data_ori
 
     def recover(data_resi, data_last, cnt):
@@ -280,10 +281,12 @@ def decode(q_input, q_output):
             zero_loss_num = 8 - len(s) % 8
             # remove padded 0/1
             if s[-1] == '0':
-                s = s[:s.rindex('1') + 1]
+                if '1' in s:
+                    s = s[:s.rindex('1') + 1]
             else:
-                s = s[:s.rindex('0') + 1]
-            return '0' * zero_loss_num + s + 'a'
+                if '0' in s:
+                    s = s[:s.rindex('0') + 1]
+            return '0' * zero_loss_num + s
 
         def float2bin(float_num, bit_num):
             bins = []
