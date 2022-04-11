@@ -2,7 +2,7 @@ import socketio
 import eventlet
 from multiprocessing import Queue
 
-def server(q_input, q_output):
+def server(port, q_input, q_output):
     sio = socketio.Server(cors_allowed_origins='*')
     app = socketio.WSGIApp(sio)
 
@@ -25,9 +25,9 @@ def server(q_input, q_output):
             sio.emit("get", q_output.get())
             # print("get")
 
-    eventlet.wsgi.server(eventlet.listen(('', 80)), app)
+    eventlet.wsgi.server(eventlet.listen(('', port)), app)
 
-def test():
+def test(port):
     q = Queue()
     sio = socketio.Server(cors_allowed_origins='*')
     app = socketio.WSGIApp(sio)
@@ -51,4 +51,4 @@ def test():
             sio.emit("get", q.get())
             # print("get")
 
-    eventlet.wsgi.server(eventlet.listen(('', 80)), app)
+    eventlet.wsgi.server(eventlet.listen(('', port)), app)

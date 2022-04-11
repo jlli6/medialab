@@ -6,7 +6,7 @@ import server
 import encoding
 import pipeIO
 
-def run_system(mode="run"):
+def run_system(mode="run", server_port=8080):
     # data
     q_send_server_encoding = Queue()
     q_send_encoding_pipe = Queue()
@@ -14,7 +14,7 @@ def run_system(mode="run"):
     q_reveive_decoding_server = Queue()
 
     # process
-    p_server = Process(target=server.server, args=(q_send_server_encoding, q_reveive_decoding_server,))
+    p_server = Process(target=server.server, args=(server_port, q_send_server_encoding, q_reveive_decoding_server,))
     p_encoding = Process(target=encoding.encode, args=(q_send_server_encoding, q_send_encoding_pipe,))
     if mode == "test":
         p_pipe = Process(target=pipeIO.test_noFIFO, args=(q_send_encoding_pipe, q_receive_pipe_decoding,))
@@ -52,17 +52,23 @@ def test_pipe():
     p_pipe.join() 
 
 if __name__ == "__main__":
+    server_port = 8080
+
     # input
-    opts, _ = getopt.getopt(sys.argv[1:], "t:", ["test="])
+    opts, _ = getopt.getopt(sys.argv[1:], "t:", ["test=", "server_port="])
 
     if opts:
+        # load paras
+        for o, a in opts:
+            if o in ("--server_port"):
+                server_port = int(a)
         # test
         for o, a in opts:
             if o in ("-t", "--test"):
                 if a == "system":
-                    run_system(mode="test")
+                    run_system(mode="test", server_port=server_port)
                 elif a == "oneway":
-                    run_system(mode="oneway")
+                    run_system(mode="oneway", server_port=server_port)
                 elif a == "server":
                     test_server()
                 elif a == "encoding":
