@@ -1,33 +1,25 @@
 from multiprocessing import Queue, Process
-import json
 import numpy as np
+import av
+import os
+import imageio
+import time
+from skimage.transform import resize
 
-intra_period = 10
-data_len = 10
+data_len = 20
 
-def encode(q_input, q_output):
-
+def encode(q_input, q_output, key_frame_freq):
     def quantization(data_ori):
-        data_quant = np.zeros(data_len, dtype=np.int16)
-
         def quant(data, ori_min, ori_max, tar_min, tar_max):
-            return round((data - ori_min) * (tar_max-tar_min) / (ori_max-ori_min)) + tar_min
-            
-        data_quant[0] = quant(data_ori["pupil"]["x"], -2, 2, 0, 4095)
-        data_quant[1] = quant(data_ori["pupil"]["y"], -2, 2, 0, 4095)
-        data_quant[2] = quant(data_ori["head"]["degrees"]["x"], -180, 180, 0, 4095)
-        data_quant[3] = quant(data_ori["head"]["degrees"]["y"], -180, 180, 0, 4095)
-        data_quant[4] = quant(data_ori["head"]["degrees"]["z"], -180, 180, 0, 4095)
-        data_quant[5] = quant(data_ori["eye"]["l"], 0, 1, 0, 4095)
-        data_quant[6] = quant(data_ori["eye"]["r"], 0, 1, 0, 4095)
-        data_quant[7] = quant(data_ori["mouth"]["x"], -0.6, 1.4, 0, 4095)
-        data_quant[8] = quant(data_ori["mouth"]["y"], 0, 1, 0, 4095)
-        data_quant[9] = quant(data_ori["mouth"]["y"], 0, 1, 0, 4095)
+            return (((data - ori_min) * (tar_max-tar_min) / (ori_max-ori_min)) + tar_min).astype(np.int16)
+
+        data_quant = data_ori.reshape(data_len)
+        data_quant = quant(data_quant, -1, 1, 0, 255)
         return data_quant
 
     def prediction(data_quant, data_last, cnt):
         data_resi = np.zeros(data_len, dtype=np.int16)
-        if cnt % intra_period == 0:
+        if cnt == 1:
             data_resi = data_quant.copy()
         else:
             data_resi = data_quant - data_last
@@ -78,150 +70,90 @@ def encode(q_input, q_output):
 
         return data_gol
 
-    def enc_binary(data_gol):
+    def binary_str2bytes(s):
+        s = '1' + s
+        pad_num = 8 - len(s) % 8
+        if s[-1] == '0':
+            s = s + ('1' * pad_num)
+        else:   
+            s = s + ('0' * pad_num)
+        return int(s, 2).to_bytes(len(s) // 8, byteorder='big')
 
-        def binary_str2bytes(s):
-            pad_num = 8 - len(s) % 8
-            if s[-1] == '0':
-                s = s + ('1' * pad_num)
-            else:   
-                s = s + ('0' * pad_num)
-            return int(s, 2).to_bytes(len(s) // 8, byteorder='big')
-
-        ## bitNum represents the bit number of bins
-        def float2bin(float_num, bit_num):
-            bins = []
-            for _ in range(bit_num):
-                float_num = float_num * 2
-                if float_num >= 1.0:
-                    bins.append(1)
-                else:
-                    bins.append(0)
-                float_num -= int(float_num)
-            return bins
+    # init key frame encoding
+    enc_codec = av.Codec("hevc", 'w')
+    enc_ctx = enc_codec.create()
+    enc_ctx.width = 256
+    enc_ctx.height = 256
+    enc_ctx.pix_fmt = 'yuv420p'
+    enc_ctx.options["x265-params"] = "frame-threads=1:\
+        keyint=-1:\
+        no-open-gop=1:\
+        weightp=0:\
+        weightb=0:\
+        cutree=0:\
+        rc-lookahead=0:\
+        bframes=0:\
+        scenecut=0:\
+        b-adapt=0:\
+        repeat-headers=1:\
+        crf=25"
     
-        def bin2float(bins):
-            float_num = 0.0
-            for i in range(len(bins)):
-                float_num += int(bins[i]) * (2**(-i-1))
-            return float_num
-        
-        ## rescale the low boundary and high boundary
-        def enc_rescale(low, high):
-            low_bin = float2bin(low, 64)
-            high_bin = float2bin(high, 64)
-            end = False
-            out_bins = ""
-            
-            while not end:
-                if low_bin[0] == high_bin[0]:
-                    out_bins += str(low_bin[0])
-                    low_bin.pop(0)
-                    high_bin.pop(0)
-                else:
-                    end = True
-            
-            new_low = bin2float(low_bin)
-            new_high = bin2float(high_bin)
-            
-            return out_bins, new_low, new_high
-        
-        ## start Binary encode
-        low = 0.0
-        high = 1.0
-        r = high - low # the length of interval
-        bit0_num = bit1_num = 1
-        p0 = p1 = 0.5
-        
-        data_bin = ""
-        
-        for c in data_gol:
-            if c == '0':
-                high = high - r*p1
-                if high != 1.0:
-                    out_bins, low, high = enc_rescale(low, high)
-                    data_bin += out_bins
-                r = high - low
-                bit0_num += 1
-            else:
-                low = low + r*p0
-                if high != 1.0:
-                    out_bins, low, high = enc_rescale(low, high)
-                    data_bin += out_bins
-                r = high - low
-                bit1_num += 1
-            ## some corner case
-            if high == 0.5 or low == 0.5:
-                high += 0.1
-                low += 0.1
-            p0 = bit0_num / (bit1_num + bit0_num)
-            p1 = 1- p0
-        
-        ## find a middle number
-        mid = low + r/2
-        mid_bin = float2bin(mid, 64)
-        end_enc = False
-        cur_pos = 1
-        while not end_enc:
-            mid_num = bin2float(mid_bin[0: cur_pos])
-            if (mid_num > low) and (mid_num < high):
-                end_enc = True
-            else:
-                cur_pos += 1
-        
-        for i in range(cur_pos):
-            data_bin += str(mid_bin[i])
-
-        return binary_str2bytes(data_bin)
-
-    
-    cnt = 0
+    # init non-key frame encoding
     data_last = np.zeros(data_len, dtype=np.int16)
-
-    while (True):
-        # q_output.put(q_input.get())
-        json_data = q_input.get()
-        data_ori = json.loads(json_data)
-        # print("send ori %s", data_ori)
-        data_quant = quantization(data_ori)
-        # print("send quant %s", data_quant)
-        data_resi, data_last = prediction(data_quant, data_last, cnt)
-        # print("send resi %s", data_resi)
-        data_gol = enc_golomb(data_resi, k=0)
-        # print("send gol %s", data_gol)
-        data_bin = enc_binary(data_gol)
-        # print("send bin %s", data_bin)
-        # return
-        q_output.put(data_bin)
-        cnt = cnt + 1
-
-def decode(q_input, q_output):
     
-    def dequantization(data_quant):
+    begin = time.time()
+    cnt = 0
+    byte_count = 0
+    k_enc_time = 0
+    nk_enc_time = 0
+    while (True):
+        if cnt % key_frame_freq == 0:
+            rgb_pic = q_input.get()
+            frame_begin = time.time()
+            rgb_frame = av.VideoFrame.from_ndarray(rgb_pic, format='rgb24')
+            yuv_frame = rgb_frame.reformat(format='yuv420p')
+            packet = enc_ctx.encode(yuv_frame)
+            # print(packet)
+            b = packet[0].to_bytes()
+            byte_count += len(b)
+            k_enc_time += time.time() - frame_begin
+            # print("enc key", cnt, time.time() - frame_begin, len(b), flush=True)
+            q_output.put(b)
+        else:
+            data_ori = q_input.get()
+            frame_begin = time.time()
+            # print("send ori %s", data_ori, flush=True)
+            data_quant = quantization(data_ori)
+            # print("send quant %s", data_quant, flush=True)
+            data_resi, data_last = prediction(data_quant, data_last, cnt)
+            # print("send resi %s", data_resi, flush=True)
+            data_gol = enc_golomb(data_resi, k=0)
+            # print("send gol %s", data_gol, flush=True)
+            data_bin = binary_str2bytes(data_gol)
+            # print("send bin %s", data_bin, flush=True)
+            # return
+            nk_enc_time += time.time() - frame_begin
+            # print("enc non-key", cnt, time.time() - frame_begin, len(data_bin))
+            byte_count += len(data_bin)
+            q_output.put(data_bin)
+        cnt = cnt + 1
+        if cnt == 906:
+            end = time.time()
+            print("encoding ", end - begin, "average ", k_enc_time / cnt, nk_enc_time / cnt, flush=True)
+            print("encode bytes", byte_count, flush=True)
 
+def decode(q_input, q_output, key_frame_freq):
+    def dequantization(data_quant):
         def dequant(data, tar_min, tar_max, ori_min, ori_max):
             return (data - ori_min) * (tar_max - tar_min) / (ori_max-ori_min) + tar_min
             
-        data_ori = {}
-        data_ori["pupil"] = {}
-        data_ori["pupil"]["x"] = dequant(data_quant[0], -2, 2, 0, 4095)
-        data_ori["pupil"]["y"] = dequant(data_quant[1], -2, 2, 0, 4095)
-        data_ori["head"] = {}
-        data_ori["head"]["degrees"] = {}
-        data_ori["head"]["degrees"]["x"] = dequant(data_quant[2], -180, 180, 0, 4095)
-        data_ori["head"]["degrees"]["y"] = dequant(data_quant[3], -180, 180, 0, 4095)
-        data_ori["head"]["degrees"]["z"] = dequant(data_quant[4], -180, 180, 0, 4095)
-        data_ori["eye"] = {}
-        data_ori["eye"]["l"] = dequant(data_quant[5], 0, 1, 0, 4095)
-        data_ori["eye"]["r"] = dequant(data_quant[6], 0, 1, 0, 4095)
-        data_ori["mouth"] = {}
-        data_ori["mouth"]["x"] = dequant(data_quant[7], -0.6, 1.4, 0, 4095)
-        data_ori["mouth"]["y"] = dequant(data_quant[8], 0, 1, 0, 64)
+        data_ori = data_quant.reshape(10, 2)
+        data_ori = dequant(data_ori, -1, 1, 0, 255)
         return data_ori
 
     def recover(data_resi, data_last, cnt):
         data = np.zeros(data_len, dtype=np.int16)
-        if cnt % intra_period == 0:
+        if cnt == 1:
             data = data_resi.copy()
         else:
             data = data_resi + data_last
@@ -247,7 +179,7 @@ def decode(q_input, q_output):
         cur_pos = 0
         data_resi = np.zeros(data_len, dtype=np.int16)
         cnt = 0
-        while (not end_decode) and (cnt < 9):
+        while (not end_decode) and (cnt < data_len):
             zero_num = count_zero(cur_pos)
             tmp_str = data_gol[cur_pos + zero_num : cur_pos + (zero_num * 2 + k + 1)]
             if tmp_str:
@@ -259,7 +191,7 @@ def decode(q_input, q_output):
             else:
                 dec_num = (dec_num + 1) / 2
             
-            if abs(dec_num) > 4095:
+            if abs(dec_num) > 255:
                 dec_num = 0
 
             data_resi[cnt] = dec_num
@@ -272,185 +204,143 @@ def decode(q_input, q_output):
 
         return data_resi
 
-    def dec_binary(data_bin):
-        dec_bin_end = False
+    def bytes2binary_str(b):
+        s = bin(int.from_bytes(b, "big"))[3:]
+        # remove padded 0/1
+        if s[-1] == '0':
+            if '1' in s:
+                s = s[:s.rindex('1') + 1]
+        else:
+            if '0' in s:
+                s = s[:s.rindex('0') + 1]
+        return s
 
-        def bytes2binary_str(b):
-            s = bin(int.from_bytes(b, "big"))[2:]
-            # count lost 0 in head
-            zero_loss_num = 8 - len(s) % 8
-            # remove padded 0/1
-            if s[-1] == '0':
-                if '1' in s:
-                    s = s[:s.rindex('1') + 1]
-            else:
-                if '0' in s:
-                    s = s[:s.rindex('0') + 1]
-            return '0' * zero_loss_num + s
+    # init key frame decoding
+    dec_codec = av.Codec("hevc")
+    dec_ctx = dec_codec.create()
+    frames = []
 
-        def float2bin(float_num, bit_num):
-            bins = []
-            for _ in range(bit_num):
-                float_num = float_num * 2
-                if float_num >= 1.0:
-                    bins.append(1)
-                else:
-                    bins.append(0)
-                float_num -= int(float_num)
-            return bins
-    
-        def bin2float(bins):
-            float_num = 0.0
-            for i in range(len(bins)):
-                float_num += int(bins[i]) * (2**(-i-1))
-            return float_num
-        
-        def dec_rescale(enc_str, low, high):
-            low_bin = float2bin(low, 64)
-            high_bin = float2bin(high, 64)
-            end = False
-            
-            while not end:
-                if low_bin[0] == high_bin[0]:
-                    low_bin.pop(0)
-                    high_bin.pop(0)
-                    if len(enc_str) > 0:
-                        enc_str.pop(0)
-                    else:
-                        dec_bin_end = True
-                        end = True
-                else:
-                    end = True
-                
-            new_low = bin2float(low_bin)
-            new_high = bin2float(high_bin)
-            
-            return enc_str, new_low, new_high
-        
-        bit1_num = bit0_num = 1
-        p0 = p1 = 0.5
-        low = 0.0
-        high = 1.0
-        r = high - low
-        
-        data_gol = ""
-        data_bin = bytes2binary_str(data_bin)
-        enc_str = list(data_bin)
-        
-        repeat_cnt = 0
-        last_len = len(enc_str)
-
-        while (not dec_bin_end) and (len(enc_str) > 1) and (repeat_cnt < 200):
-            last_len = len(enc_str)
-            if len(enc_str) > 64:
-                enc_num = bin2float(enc_str[0:64])
-            else:
-                enc_num = bin2float(enc_str[:-1])
-            
-            boundary = low + r*p0
-            if enc_num > boundary:
-                data_gol += '1'
-                low = low + r*p0
-                if high != 1.0:
-                    enc_str, low, high = dec_rescale(enc_str, low, high)
-                r = high - low
-                bit1_num += 1
-            else:
-                data_gol += '0'
-                high = high - r*p1
-                if high != 1.0:
-                    enc_str, low, high = dec_rescale(enc_str, low, high)
-                r = high - low
-                bit0_num += 1
-            if high == 0.5 or low == 0.5:
-                high += 0.1
-                low += 0.1
-                r = high - low
-            p0 = bit0_num / (bit1_num + bit0_num)
-            p1 = 1- p0
-
-            if last_len == len(enc_str):
-                repeat_cnt = repeat_cnt + 1
-            else:
-                repeat_cnt = 0
-        
-        return data_gol
-
-    cnt = 0
+    # init non-key frame encoding
     data_last = np.zeros(data_len, dtype=np.int16)
 
+    begin = time.time()
+    cnt = 0
+    k_dec_time = 0
+    nk_dec_time = 0
     while (True):
-        # q_output.put(q_input.get())
-        data_bin = q_input.get()
-        # print("receive bin %s", data_bin)
-        data_gol = dec_binary(data_bin)
-        # print("receive gol %s", data_gol)
-        data_resi = dec_golomb(data_gol, 0)
-        # print("receive resi %s", data_resi)
-        data_quant, data_last = recover(data_resi, data_last, cnt)
-        # print("receive quant %s", data_quant)
-        data_ori = dequantization(data_quant)
-        # print("receive ori %s", data_ori)
-        # return
-        json_data = json.dumps(data_ori)
-        q_output.put(json_data)
+        if cnt % key_frame_freq == 0:
+            while not frames:
+                packet = av.packet.Packet(q_input.get())
+                # print(packet)
+                frame_begin = time.time()
+                frames = dec_ctx.decode(packet)
+            frame = frames.pop(0)
+            # print(frames, flush=True)
+            frame = frame.reformat(format='rgb24')
+            k_dec_time += time.time() - frame_begin
+            # print("dec key", cnt, time.time() - frame_begin)
+            q_output.put(frame.to_ndarray())
+        else:
+            # q_output.put(q_input.get())
+            data_bin = q_input.get()
+            frame_begin = time.time()
+            # print("receive bin %s", data_bin)
+            data_gol = bytes2binary_str(data_bin)
+            # print("receive gol %s", data_gol)
+            data_resi = dec_golomb(data_gol, 0)
+            # print("receive resi %s", data_resi)
+            data_quant, data_last = recover(data_resi, data_last, cnt)
+            # print("receive quant %s", data_quant)
+            data_ori = dequantization(data_quant)
+            # print("receive ori %s", data_ori)
+            # return
+            nk_dec_time += time.time() - frame_begin
+            # print("dec non-key", cnt, time.time() - frame_begin)
+            q_output.put(data_ori)
         cnt = cnt + 1
+        if cnt == 906:
+            end = time.time()
+            print("decoding ", end - begin, "average ", k_dec_time / cnt, nk_dec_time / cnt, flush=True)
 
 def test():
     def compare(ori, rec):
-        if abs(ori["pupil"]["x"] - rec["pupil"]["x"]) > 0.1:
-            print("pupil x", ori["pupil"]["x"], rec["pupil"]["x"])
-            return False
-        if abs(ori["pupil"]["y"] - rec["pupil"]["y"]) > 0.1:
-            print("pupil y", ori["pupil"]["y"], rec["pupil"]["y"])
-            return False
-        if abs(ori["mouth"]["x"] - rec["mouth"]["x"]) > 0.1:
-            print("mouth x", ori["mouth"]["x"], rec["mouth"]["x"])
-            return False
-        if abs(ori["mouth"]["y"] - rec["mouth"]["y"]) > 0.1:
-            print("mouth y", ori["mouth"]["y"], rec["mouth"]["y"])
-            return False
-        if abs(ori["eye"]["l"] - rec["eye"]["l"]) > 0.1:
-            print("eye l", ori["eye"]["l"], rec["eye"]["l"])
-            return False
-        if abs(ori["eye"]["r"] - rec["eye"]["r"]) > 0.1:
-            print("eye r", ori["eye"]["r"], rec["eye"]["r"])
-            return False
-        if abs(ori["head"]["degrees"]["x"] - rec["head"]["degrees"]["x"]) > 1:
-            print("head degrees x", ori["head"]["degrees"]["x"], rec["head"]["degrees"]["x"])
-            return False
-        if abs(ori["head"]["degrees"]["y"] - rec["head"]["degrees"]["y"]) > 1:
-            print("head degrees y", ori["head"]["degrees"]["y"], rec["head"]["degrees"]["y"])
-            return False
-        if abs(ori["head"]["degrees"]["z"] - rec["head"]["degrees"]["z"]) > 1:
-            print("head degrees z", ori["head"]["degrees"]["z"], rec["head"]["degrees"]["z"])
-            return False
-        return True
-
+        diff = abs(ori - rec).max()
+        return diff < 0.1
 
     q_test_encoding = Queue()
     q_test_decoding = Queue()
     q_test_output = Queue()
 
-    p_test_encoding = Process(target=encode, args=(q_test_encoding, q_test_decoding,))
-    p_test_decoding = Process(target=decode, args=(q_test_decoding, q_test_output,))
+    p_test_encoding = Process(target=encode, args=(q_test_encoding, q_test_decoding, 5))
+    p_test_decoding = Process(target=decode, args=(q_test_decoding, q_test_output, 5))
 
     p_test_encoding.start()
     p_test_decoding.start()
 
-    cnt = 0
-    f = open("test", mode="r")
-    for line in f:
-        q_test_encoding.put(line)
-        result = q_test_output.get()
-        if compare(json.loads(line), json.loads(result)):
-            print("pass")
-        else:
-            print("not pass")
-            print(cnt)
-            # break
-        cnt = cnt + 1
+    pic = imageio.imread("./pics/crop/001.png")
+    q_test_encoding.put(pic)
+    point1 = np.array([[-0.29995272, -0.41500735],
+        [-0.1831193 , -0.4941489 ],
+        [ 0.17194158, -0.02667506],
+        [ 0.27690977, -0.57377136],
+        [-0.08036794,  0.64549434],
+        [-0.12413598, -0.5141814 ],
+        [ 0.02390239,  0.1053941 ],
+        [ 0.01737955,  0.8387395 ],
+        [ 0.10470815,  0.36350307],
+        [-0.18321006,  0.63568604]])
+    q_test_encoding.put(point1)
+    point2 = np.array([[-0.31107202, -0.4134046 ],
+        [-0.19297837, -0.49424404],
+        [ 0.16959237, -0.02490935],
+        [ 0.27347967, -0.57262707],
+        [-0.07985441,  0.65166545],
+        [-0.12969008, -0.5119384 ],
+        [ 0.01797307,  0.10420455],
+        [ 0.01933212,  0.8386648 ],
+        [ 0.10187937,  0.36533636],
+        [-0.18098857,  0.64667803]])
+    q_test_encoding.put(point2)
+    point3 = np.array([[-0.31828535, -0.41295305],
+        [-0.1977081 , -0.49448925],
+        [ 0.16152754, -0.02694203],
+        [ 0.26536   , -0.57589686],
+        [-0.08598499,  0.65046614],
+        [-0.13402188, -0.511879  ],
+        [ 0.00829535,  0.10598138],
+        [ 0.00964345,  0.8365848 ],
+        [ 0.09859097,  0.3668807 ],
+        [-0.18879706,  0.64301157]])
+    q_test_encoding.put(point3)
+    point4 = np.array([[-0.32165393, -0.4150526 ],
+        [-0.19993302, -0.49823737],
+        [ 0.16241762, -0.0259697 ],
+        [ 0.2668095 , -0.57577544],
+        [-0.08554569,  0.6539978 ],
+        [-0.13409549, -0.5143306 ],
+        [ 0.0088184 ,  0.10389032],
+        [ 0.01263414,  0.83522844],
+        [ 0.09746552,  0.36876327],
+        [-0.18604723,  0.6528257 ]])
+    q_test_encoding.put(point4)
+    point = [point1, point2, point3, point4]
+    pic = imageio.imread("./pics/crop/006.png")
+    q_test_encoding.put(pic)
 
-    f.close()
+    for cnt in range(6):
+        if cnt % 5 == 0:
+            pic = q_test_output.get()
+            pic_num = str(cnt+1).zfill(3)
+            imageio.imwrite("rec" + pic_num + ".png", pic)
+            os.system(f"ffmpeg -i ./pics/crop/{pic_num}.png -i rec{pic_num}.png -lavfi psnr -f null -")
+            # os.system(f"rm rec{pic_num}.png")
+        else:
+            point_rec = q_test_output.get()
+            if not compare(point[cnt-1], point_rec):
+                print(point[cnt-1])
+                print(point_rec)
+            else:
+                print('pass', cnt)
+
     p_test_encoding.kill()
     p_test_decoding.kill()

@@ -2,15 +2,62 @@ import os
 from multiprocessing import Queue, Process
 import time
 
-def write(q_input, fifo):
-    f = os.open(fifo, os.O_WRONLY)
-    while (True):
-        os.write(f, q_input.get())
+from numpy import size
 
-def read(q_output, fifo):
-    f = os.open(fifo, os.O_RDONLY)
+def write(q_input, fifo_path, key_frame_freq):
+    f_v = os.open(fifo_path + "video/svideopipe", os.O_WRONLY)
+    print("send open1", time.time(), flush=True)
+    f_p = os.open(fifo_path + "point/svideopipe", os.O_WRONLY)
+    print("send open2",  time.time(), flush=True)
+    cnt = 0
     while (True):
-        q_output.put(os.read(f, 100))
+        if cnt % key_frame_freq == 0:
+            s = q_input.get() + b'\x0f\x0f'
+            print("send!!!", len(s), cnt)
+            os.write(f_v, s)
+        else:
+            b = q_input.get()
+            print("send!!!", len(b), cnt)
+            os.write(f_p, b + b'\x0f\x0f')
+        cnt = cnt + 1
+        print("end write ", cnt, time.time(), flush=True)
+        # time.sleep(0.01)
+
+def read(q_output, fifo_path, key_frame_freq):
+    f_v = os.open(fifo_path + "video/cvideopipe", os.O_RDONLY)
+    print("receive open1", time.time(), flush=True)
+    f_p = os.open(fifo_path + "point/cvideopipe", os.O_RDONLY)
+    print("receive open2",  time.time(), flush=True)
+    cnt = 0
+    s = b''
+    b = b''
+    while (True):
+        if cnt % key_frame_freq == 0:
+            while not (b'\x0f\x0f' in s):
+                s += os.read(f_v, 1024)
+                print("!!!!!!!! ", len(s), cnt)
+                # if b'\x0f\x0f' in s:
+                #     break
+            # print("!!!!!!!! ", len(s), cnt)
+            lenth = len(s)
+            index = s.find(b'\x0f\x0f')
+            tmp = s[:index]
+            q_output.put(tmp)
+            s = s[index+2:]
+        else:
+            while not (b'\x0f\x0f' in b):
+                b += os.read(f_p, 1024)
+                # print("!!!!!!!! ", len(b), cnt)
+                # if b'\x0f\x0f' in b:
+                #     break
+            lenth = len(b)
+            index = b.find(b'\x0f\x0f')
+            tmp = b[:index]
+            q_output.put(tmp)
+            b = b[index + 2:]
+        cnt = cnt + 1
+        print("end receive ", cnt, lenth,  time.time(), flush=True)
+        # time.sleep(0.01)
 
 def test_noFIFO(q_input, q_output):
     while (True):
