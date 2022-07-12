@@ -1,3 +1,6 @@
 [submodule "submodule/kalidokit"]
 	path = submodule/kalidokit
 	url = https://github.com/Avery-xu/kalidokit.git
+[submodule "submodule/face_encoding"]
+	path = submodule/face_encoding
+	url = https://github.com/Avery-xu/face_encoding
